@@ -1,396 +1,486 @@
 #!/usr/bin/env python3
-"""THE WORLD TODAY - one-page newspaper of 24 November 2026 world news.
+"""news-image-20261124 v3 — one day of world news, Tuesday 24 November 2026.
 
-Renders entry.png (768x1024): masthead, lead Gaza story with illustration,
-29 further verified stories in three columns, a Zaporizhzhia photo strip
-mid-page, and a footer. 30 stories, 9 regions, every event dated
-Tuesday 24 November 2026. Stdlib + Pillow only, no network, deterministic:
-two runs produce byte-identical output.
-
-Usage:  python3 main.py
-Writes entry.png to $MAKEFUN_OUTPUT_DIR, or /output, or a temp dir.
-If rendering fails, falls back to copying the bundled entry.png.
+1024x1024 broadsheet: 38 verified stories, 7 regions, 19 fields, 13 drawn
+feature cards, UTC timeline, IN NUMBERS strip, world-map pins, DATE CHECK.
+Deterministic: identical bytes on every run. Stdlib + Pillow at render time;
+if Pillow is missing, falls back to copying a bundled entry.png.
+Default output is absolute /output with a temp-dir fallback chain.
 """
-
-import hashlib
 import os
 import shutil
 import sys
 import tempfile
-from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+HERE = os.path.dirname(os.path.abspath(__file__))
+ENTRY_NAME = "entry.png"
+W, H = 1024, 1024
 
-HERE = Path(__file__).resolve().parent
-W, H = 768, 1024
-MARGIN = 14
-COL_W = 740  # full content width
-
-PAPER = (248, 244, 236)
-INK = (20, 20, 20)
-MUTED = (90, 86, 78)
-RED = (158, 27, 27)
-RULE = (40, 40, 40)
-HAIRLINE = (180, 174, 162)
-
-FONT_DIR = "/usr/share/fonts/truetype"
-SERIF_BOLD = f"{FONT_DIR}/dejavu/DejaVuSerif-Bold.ttf"
-SANS_BOLD = f"{FONT_DIR}/dejavu/DejaVuSans-Bold.ttf"
-SANS = f"{FONT_DIR}/dejavu/DejaVuSans.ttf"
-
-
-def font(path, size):
-    try:
-        return ImageFont.truetype(path, size)
-    except Exception:
-        return ImageFont.load_default(size=size)
-
-
-def wrap(text, fnt, max_w):
-    """Greedy word wrap; returns list of lines that fit max_w."""
-    words = text.split()
-    lines, cur = [], ""
-    for word in words:
-        trial = f"{cur} {word}".strip()
-        if fnt.getlength(trial) <= max_w or not cur:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
-    return lines
-
-
-def fit_lines(text, path, size, max_w, max_lines, min_size=8):
-    """Shrink font until text fits in max_lines; returns (font, lines)."""
-    s = size
-    while s >= min_size:
-        fnt = font(path, s)
-        lines = wrap(text, fnt, max_w)
-        if len(lines) <= max_lines:
-            return fnt, lines
-        s -= 1
-    fnt = font(path, min_size)
-    return fnt, wrap(text, fnt, max_w)[:max_lines]
-
-
-def crop_to(img, tw, th, focus_y=0.5):
-    """Center-crop image to target aspect, then resize to tw x th.
-
-    focus_y (0..1) biases the vertical crop window: 0.5 is centred,
-    higher values favour the lower part of the frame.
-    """
-    sw, sh = img.size
-    target = tw / th
-    if sw / sh > target:  # too wide: trim sides
-        nw = int(sh * target)
-        x0 = (sw - nw) // 2
-        img = img.crop((x0, 0, x0 + nw, sh))
-    else:  # too tall: trim top/bottom
-        nh = int(sw / target)
-        y0 = int((sh - nh) * focus_y)
-        img = img.crop((0, y0, sw, y0 + nh))
-    return img.resize((tw, th), Image.LANCZOS)
-
-
-def load_scene(name, tw, th, focus_y=0.5):
-    """Load a repo scene PNG, cropped to tw x th; grey placeholder if absent."""
-    try:
-        with Image.open(HERE / name) as im:
-            return crop_to(im.convert("RGB"), tw, th, focus_y)
-    except Exception:
-        ph = Image.new("RGB", (tw, th), (70, 70, 70))
-        d = ImageDraw.Draw(ph)
-        d.text((tw // 2, th // 2), "ILLUSTRATION", fill=(220, 220, 220),
-               font=font(SANS, 12), anchor="mm")
-        return ph
-
-
-# ---------------------------------------------------------------- stories
-# (number, region tag, headline, one-line summary)
-# Every figure checked against the v2 research file. Dow: AP +0.85% only.
-# Hanoi: 6 dead. Shenzhou-24: crew unveiled 24 Nov; launch was 25 Nov.
-STORIES = [
-    (1, "GAZA",
-     "ISRAEL KILLS HAMAS SECURITY CHIEF IN GAZA",
-     "Israeli strike in Gaza City kills Hamas internal-security chief Naeem Abu Nahel; "
-     "7 Palestinians killed in a day as the US-brokered ceasefire holds."),
-    (2, "CHINA",
-     "CHINA PURGES SHANGHAI PARTY BOSS CHEN JINING",
-     "Xi's purge claims a 4th Politburo member: Shanghai chief Chen Jining, 62, "
-     "under investigation."),
-    (3, "TAIWAN",
-     "TAIEX SOARS 8.99% IN RECORD DAY",
-     "Taiex jumps +3,310.46 to 40,122.35, its biggest points gain ever; TSMC hits "
-     "its 10% daily limit."),
-    (4, "UKRAINE",
-     "RUSSIAN STRIKE KILLS 2, WOUNDS 40 IN ZAPORIZHZHIA",
-     "Overnight strike on a Zaporizhzhia residential area kills 2 and wounds 40, "
-     "incl. a baby and children aged 4, 6 and 16."),
-    (5, "SAUDI ARABIA",
-     "HOUTHI DRONE HITS RIYADH TOWER, 11 HURT",
-     "Houthis hit Riyadh's tallest tower, the PIF Tower, a 2nd time in a week; "
-     "11 wounded."),
-    (6, "FRANCE",
-     "SANOFI SEALS $41BN INSMED DEAL",
-     "Sanofi to buy US biotech Insmed at $175 a share \u2014 $41.0bn, the biggest "
-     "pharma deal since 2023."),
-    (7, "USA",
-     "HUAWEI CONVICTED IN US CRIMINAL TRIAL",
-     "Brooklyn jury finds Huawei guilty on 10 of 12 counts: fraud, Iran sanctions "
-     "breaches, theft."),
-    (8, "UNITED KINGDOM",
-     "MI5 WARNS UK FIRMS OF RUSSIAN SABOTAGE",
-     "MI5 warns firms supplying Ukraine's military of higher Russian sabotage "
-     "risk, often arson."),
-    (9, "IRAQ",
-     "BAGHDAD MOVES TO SEIZE KURDISH OILFIELDS",
-     "PM orders federal control of Kurdistan oilfields and border crossings after "
-     "a smuggling probe."),
-    (10, "ASIA MARKETS",
-     "ASIA CHIP STOCKS SURGE \u2014 KOSPI 5,006, NIKKEI 58,645",
-     "KOSPI +6.32% to 5,006.03; Nikkei +3.91% to 58,644.63 as the chip rally "
-     "sweeps Asia."),
-    (11, "USA MARKETS",
-     "WALL ST: NASDAQ \u22121.5% AS NVIDIA SLIDES 5.9%",
-     "Nvidia \u22125.86% to $155.38, Nasdaq \u22121.48%, S&P \u22120.50%; Dow bucks the "
-     "fall, +0.85% to 50,018.70."),
-    (12, "MALAYSIA",
-     "MALAYSIA TO SEND BACK 6,803 MYANMAR NATIONALS",
-     "PM Anwar says 6,803 Myanmar nationals go home in December, days after the "
-     "ICJ genocide ruling."),
-    (13, "AFRICA",
-     "SENEGAL GET AFCON TITLE BACK ON APPEAL",
-     "CAS reinstates Senegal's 1\u20130 extra-time win over Morocco \u2014 Senegal are "
-     "African champions again."),
-    (14, "GLOBAL",
-     "UN: 5 WOMEN KILLED EVERY HOUR AT HOME",
-     "47,000 women and girls were killed by a partner or family member in 2025 "
-     "\u2014 about 5 an hour."),
-    (15, "UNITED KINGDOM",
-     "UK HEAT DEATHS HIT RECORD 5,258",
-     "5,258 heat deaths in England in summer 2026 \u2014 the worst on record, "
-     "nearly double 2022's 2,985."),
-    (16, "SOUTH KOREA",
-     "RUSSIAN JETS ENTER S. KOREA AIR ZONE",
-     "Russian jets enter the KADIZ near Ulleung Island; Seoul scrambles "
-     "fighters, warns islanders."),
-    (17, "UKRAINE",
-     "ZELENSKIY ADMITS UKRAINE HIT RUSSIAN SHIP",
-     "Zelenskiy confirms Ukraine hit the Russian cargo ship Sparta II: "
-     "\u201cWe did everything right.\u201d"),
-    (18, "USA",
-     "DELL REVENUE DOUBLES ON AI SERVER BOOM",
-     "Dell Q3 revenue +103% to a record $54.9bn; AI server sales jump 291% "
-     "to $22.0bn."),
-    (19, "GAZA",
-     "GAZA DECLARES MENINGITIS EPIDEMIC ALERT",
-     "272 meningitis cases in October \u2014 8\u00d7 the normal rate; 15 deaths this "
-     "year, infants under 1 are 71%."),
-    (20, "FRANCE",
-     "SARKOZY & BRUNI ORDERED TO STAND TRIAL",
-     "French judges order ex-president Sarkozy and wife Carla Bruni to trial "
-     "over witness tampering."),
-    (21, "ETHIOPIA",
-     "AMNESTY: TIGRAY SHELLING MAY BE WAR CRIMES",
-     "Amnesty says army shelling of Alamata civilians killed 14 and must be "
-     "probed as war crimes."),
-    (22, "VIETNAM",
-     "HANOI GAS BLAST KILLS 6, INJURES 10",
-     "Suspected gas blast at a Hanoi hotpot eatery kills 6 and injures 10; "
-     "the building partly collapses."),
-    (23, "UAE",
-     "UAE BUS CRASH KILLS 13, INJURES 14",
-     "Bus carrying 41 hits a broken-down truck in Ras Al Khaimah; 13 dead, "
-     "14 injured."),
-    (24, "USA",
-     "TRUMP PARDONS TURKEYS; HONOURS GIULIANI",
-     "Trump pardons Thanksgiving turkeys Freedom and Feathers, then honours "
-     "Rudy Giuliani with a medal."),
-    (25, "COLOMBIA",
-     "30 HOSTAGES SEIZED IN CARTAGENA SUPERMARKET",
-     "Masked gunmen seize 30 shoppers and staff in a Cartagena supermarket; "
-     "5 freed, 25 still held."),
-    (26, "USA",
-     "FORT HOOD KILLER SEEKS EXECUTION STAY",
-     "Nidal Hasan, who killed 13 at Fort Hood in 2009, seeks a stay of his "
-     "3 Dec execution."),
-    (27, "SPACE",
-     "PAKISTAN'S FIRST ASTRONAUT SET FOR SPACE",
-     "China unveils the Shenzhou-24 crew: Zeeshan Ali, 40, will be the first "
-     "Pakistani in space."),
-    (28, "BANGLADESH",
-     "HASINA SEEKS RETURN TO DHAKA ON DEC 16",
-     "Ousted PM Hasina plans to return from exile in India on 16 Dec; Dhaka "
-     "says only by extradition."),
-    (29, "LATVIA",
-     "LATVIA: UKRAINE WAR MAY TIP NEXT YEAR",
-     "Latvia's president: the war may reach a \u201ctipping point\u201d in 2027, "
-     "leading to Moscow's defeat."),
-    (30, "DR CONGO",
-     "EBOLA WORKERS RESCUED AFTER 3 DAYS TRAPPED",
-     "WHO evacuates Ebola staff from a hospital in Akwe after 3 days "
-     "sheltering amid fighting in Ituri."),
-]
-
-
-def draw_story(d, x, y, w, story):
-    """One small story: red number+tag line, bold headline, 2-line summary.
-
-    Fits a 60px-tall slot; font sizes shrink if a headline/summary runs long.
-    """
-    num, tag, headline, summary = story
-    d.text((x, y), f"{num:02d} \u00b7 {tag}", fill=RED, font=font(SANS_BOLD, 9))
-    hy = y + 12
-    hfnt, hlines = fit_lines(headline, SANS_BOLD, 11, w, 2, min_size=9)
-    ly = hy
-    for ln in hlines:
-        d.text((x, ly), ln, fill=INK, font=hfnt)
-        ly += 12
-    sfnt, slines = fit_lines(summary, SANS, 9, w, 2, min_size=8)
-    ly += 1
-    for ln in slines:
-        d.text((x, ly), ln, fill=MUTED, font=sfnt)
-        ly += 11
-    return ly
-
-
-def render():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    by_num = {s[0]: s for s in STORIES}
-
-    # ---- masthead ----
-    mast = font(SERIF_BOLD, 40)
-    d.text((W // 2, 8), "THE WORLD TODAY", fill=INK, font=mast, anchor="ma")
-    d.line([(MARGIN, 56), (W - MARGIN, 56)], fill=RED, width=2)
-    d.line([(MARGIN, 59), (W - MARGIN, 59)], fill=RULE, width=1)
-    d.text((MARGIN, 64), "TUESDAY \u00b7 24 NOVEMBER 2026", fill=INK,
-           font=font(SANS_BOLD, 12))
-    d.text((W - MARGIN, 64), "30 STORIES \u00b7 9 REGIONS", fill=RED,
-           font=font(SANS_BOLD, 12), anchor="ra")
-    d.line([(MARGIN, 82), (W - MARGIN, 82)], fill=RULE, width=1)
-
-    # ---- lead story #1: Gaza scene + headline + summary ----
-    scene = load_scene("scene.png", COL_W, 104, focus_y=0.62)
-    img.paste(scene, (MARGIN, 88))
-    lead = by_num[1]
-    lh_fnt, lh_lines = fit_lines(lead[2], SANS_BOLD, 20, COL_W, 1, min_size=16)
-    for ln in lh_lines:
-        d.text((MARGIN, 198), ln, fill=INK, font=lh_fnt)
-    lfnt, llines = fit_lines(lead[3], SANS, 11, COL_W, 2, min_size=10)
-    ly = 224
-    for ln in llines:
-        d.text((MARGIN, ly), ln, fill=MUTED, font=lfnt)
-        ly += 14
-    d.line([(MARGIN, 254), (W - MARGIN, 254)], fill=RULE, width=1)
-
-    # ---- 3-column grid ----
-    gutter = 8
-    col_w = (COL_W - 2 * gutter) // 3  # 241
-    col_x = [MARGIN, MARGIN + col_w + gutter, MARGIN + 2 * (col_w + gutter)]
-    row_h, pitch = 60, 62
-
-    def grid(story_nums, y0):
-        y = y0
-        for i in range(0, len(story_nums), 3):
-            for j, n in enumerate(story_nums[i:i + 3]):
-                draw_story(d, col_x[j], y, col_w, by_num[n])
-            y += pitch
-        return y
-
-    # Section A: stories 2,3,5,6,7,8,9,10 (story 4 gets the photo strip)
-    y = grid([2, 3, 5, 6, 7, 8, 9, 10], 262)
-
-    # ---- Zaporizhzhia photo strip: story #4 ----
-    by = y + 2
-    scene2 = load_scene("scene2.png", 300, 88)
-    img.paste(scene2, (MARGIN, by))
-    tx = MARGIN + 310
-    tw = W - MARGIN - tx
-    s4 = by_num[4]
-    d.text((tx, by + 1), f"04 \u00b7 {s4[1]}", fill=RED, font=font(SANS_BOLD, 9))
-    hfnt, hlines = fit_lines(s4[2], SANS_BOLD, 14, tw, 2, min_size=11)
-    hy = by + 14
-    for ln in hlines:
-        d.text((tx, hy), ln, fill=INK, font=hfnt)
-        hy += 17
-    sfnt, slines = fit_lines(s4[3], SANS, 10, tw, 2, min_size=9)
-    sy = hy + 1
-    for ln in slines:
-        d.text((tx, sy), ln, fill=MUTED, font=sfnt)
-        sy += 13
-    d.line([(MARGIN, by + 94), (W - MARGIN, by + 94)], fill=RULE, width=1)
-
-    # ---- Section B: stories 11-30 ----
-    y = grid(list(range(11, 31)), by + 102)
-
-    # ---- footer ----
-    fy = 1006
-    d.line([(MARGIN, 1000), (W - MARGIN, 1000)], fill=HAIRLINE, width=1)
-    d.text((W // 2, fy), "30 stories \u00b7 9 regions  |  Sources: Reuters \u00b7 AP \u00b7 "
-           "UN News \u00b7 UKHSA \u00b7 Dell \u00b7 Sanofi \u00b7 Amnesty",
-           fill=MUTED, font=font(SANS, 9), anchor="ma")
-    return img
+PAPER = (247, 243, 234)
+INK = (17, 17, 17)
+MUTED = (107, 101, 88)
+RED = (179, 35, 27)
+LINE = (17, 17, 17)
+LAND = (216, 210, 194)
+LAND_LINE = (138, 132, 116)
+BADGE = {"C": (26, 122, 58), "O": (26, 79, 156), "R": (179, 35, 27),
+         "CL": (138, 109, 0)}
 
 
 def resolve_output_dir():
-    """$MAKEFUN_OUTPUT_DIR, else /output, else a temp dir. Never crashes."""
-    candidates = []
-    env = os.environ.get("MAKEFUN_OUTPUT_DIR")
-    if env:
-        candidates.append(Path(env))
-    candidates.append(Path("/output"))
-    for cand in candidates:
+    """Absolute /output first, then temp dir. Never crash on output."""
+    for cand in ("/output", os.path.join(tempfile.gettempdir(), "news-image")):
         try:
-            cand.mkdir(parents=True, exist_ok=True)
-            probe = cand / ".write-test"
-            probe.write_text("ok")
-            probe.unlink()
+            os.makedirs(cand, exist_ok=True)
+            probe = os.path.join(cand, ".write_test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
             return cand
         except Exception:
             continue
-    return Path(tempfile.mkdtemp(prefix="news-image-"))
+    return tempfile.gettempdir()
+
+
+# ---------------------------------------------------------------- data
+# (n, image, tag, badge, headline, summary, source)
+FEATURES = [
+    (1, "card1.png", "CHINA · POLITICS", "C",
+     "SHANGHAI PARTY BOSS CHEN JINING UNDER PROBE",
+     "Xi's purge claims a 4th Politburo member: Shanghai chief Chen Jining, 62, "
+     "under investigation for 'severe violations'.",
+     "Reuters · Xinhua"),
+    (2, "card2.png", "USA · TECH", "C",
+     "HUAWEI GUILTY ON 10 OF 12 COUNTS IN US TRIAL",
+     "Brooklyn jury convicts Huawei of bank and wire fraud, Iran sanctions "
+     "breaches and trade-secret theft.",
+     "Reuters"),
+    (3, "card3.png", "UKRAINE · WAR", "C",
+     "RUSSIAN ATTACKS KILL 9 ACROSS UKRAINE IN A DAY",
+     "Strikes across Ukraine kill 9 and wound 77 in a day; Zaporizhzhia flats "
+     "hit, 2 killed, 44+ wounded incl. children.",
+     "Kyiv Independent · Reuters"),
+    (4, "card4.png", "SOUTH KOREA · SECURITY", "C",
+     "RUSSIAN JETS SPARK KOREA AIR RAID ALERT",
+     "Russian jets enter the KADIZ; Seoul scrambles fighters and warns islanders.",
+     "Yonhap"),
+    (5, "card5.png", "SOLOMON ISLANDS · DIPLOMACY", "R",
+     "SOLOMONS TO LET ITS CHINA PACT LAPSE",
+     "Honiara tells Beijing it won't renew the 2022 security pact in April.",
+     "Sydney Morning Herald"),
+    (6, "card6.png", "SENEGAL · SPORT", "C",
+     "SENEGAL AFCON TITLE RESTORED ON APPEAL",
+     "CAS reinstates Senegal's 1–0 extra-time win over Morocco; champions again.",
+     "AP"),
+    (7, "card7.png", "USA · MARKETS", "C",
+     "DOW CLOSES BACK ABOVE 50,000",
+     "Dow +0.85% to 50,018.70 as Nasdaq slides 1.5% and Nvidia falls 5.9%.",
+     "AP · Reuters"),
+    (8, "card8.png", "FRANCE · PHARMA", "O",
+     "SANOFI TO BUY INSMED FOR $41BN",
+     "Sanofi agrees a $175-a-share cash deal for US biotech Insmed — $41.0bn.",
+     "Sanofi"),
+    (9, "card9.png", "GAZA · WAR", "C",
+     "ISRAEL KILLS HAMAS SECURITY CHIEF",
+     "Israeli strike in Gaza City kills Hamas internal-security chief Abu Nahel.",
+     "Reuters"),
+    (10, "card10.png", "IRAQ · ENERGY", "C",
+     "BAGHDAD ORDERS KURDISH OIL TAKEOVER",
+     "Baghdad orders federal control of Kurdistan oilfields; Barzani rejects it.",
+     "Reuters"),
+    (11, "card11.png", "UAE · ACCIDENT", "C",
+     "BUS HITS TRUCK IN RAS AL KHAIMAH: 13 DEAD",
+     "Bus carrying 41 hits a broken-down truck; 13 killed, 14 injured.",
+     "Gulf News"),
+    (12, "card12.png", "ENGLAND · CLIMATE", "O",
+     "RECORD 5,258 HEAT DEATHS IN ENGLAND",
+     "Summer 2026 heat killed an estimated 5,258 in England, the worst on record.",
+     "UKHSA"),
+    (13, "card13.png", "FRENCH GUIANA · SPACE", "O",
+     "ARIANE 6 LOFTS 36 AMAZON SATELLITES",
+     "Ariane 6 launches 36 Amazon Leo satellites from Kourou at 11:14 UTC.",
+     "Amazon · Arianespace"),
+]
+
+# (n, badge, headline, source)
+ALSO = [
+    (14, "C", "UK warns firms backing Ukraine", "Reuters"),
+    (15, "C", "Slovakia MPs end postal votes", "Reuters"),
+    (16, "C", "Nahel officer to face murder trial", "Reuters"),
+    (17, "O", "Turkey helicopter crash kills 5", "Defence Min."),
+    (18, "O", "UK sanctions Houthi leaders", "gov.uk"),
+    (19, "C", "Congo rebels say advance halted", "Al Jazeera"),
+    (20, "O", "Ethiopia war-crimes probe urged", "Amnesty"),
+    (21, "C", "Separatist denies war crimes in Oslo", "AFP"),
+    (22, "R", "Hasina plans 16 Dec return", "Reuters"),
+    (23, "C", "Manila court rejects Duterte pleas", "SC"),
+    (24, "C", "Pakistani named to Shenzhou-24 crew", "AP"),
+    (25, "C", "India bus crash kills 4 children", "PTI"),
+    (26, "C", "Hanoi eatery gas blast kills 6", "AP"),
+    (27, "C", "England beat Australia in T20", "ESPNcricinfo"),
+    (28, "O", "Wong backs US alliance", "DFAT"),
+    (29, "C", "Vanuatu pact splits Canberra", "AAP"),
+    (30, "O", "US confidence index 103.3", "Conf. Board"),
+    (31, "C", "Bolsonaro still in intensive care", "AFP"),
+    (32, "C", "Cartagena hostage standoff", "Reuters"),
+    (33, "O", "Nigeria central bank holds at 23%", "CBN"),
+    (34, "O", "UN: 5 women an hour killed by kin", "UN"),
+    (35, "C", "Real Madrid 5–1 PSV in Champions League", "UEFA"),
+    (36, "C", "Riyadh tower hit, 11 hurt", "Reuters"),
+    (37, "C", "Gazipur garment clash", "Reuters"),
+    (38, "C", "Nepal quake M5.3", "PTI/USGS"),
+]
+
+TIMELINE = [
+    ("00:30", "India bus crash"), ("01:00", "Hanoi blast"),
+    ("05:30", "Sanofi deal"), ("11:14", "Ariane 6 launch"),
+    ("11:37", "Ukraine 9 killed"), ("15:00", "US confidence"),
+    ("16:30", "Turkey crash"), ("21:00", "Dow 50,000"),
+]
+
+NUMBERS = [
+    ("9", "killed in Ukraine in a day"),
+    ("10 of 12", "counts: Huawei guilty"),
+    ("50,000", "Dow closes back above"),
+    ("$41bn", "Sanofi buys Insmed"),
+    ("5,258", "heat deaths, England record"),
+    ("13", "die in UAE bus crash"),
+]
+
+CHIPS = [("EUROPE", 8), ("MIDDLE EAST", 6), ("AFRICA", 5), ("ASIA", 9),
+         ("OCEANIA", 4), ("AMERICAS", 5), ("WORLD", 1)]
+
+# Simplified continent polygons in (lon, lat).
+CONTINENTS = [
+    [(-168, 66), (-140, 70), (-120, 72), (-95, 80), (-80, 73), (-75, 60),
+     (-70, 42), (-80, 32), (-90, 21), (-97, 16), (-105, 20), (-115, 30),
+     (-125, 40), (-125, 49), (-140, 60), (-165, 60)],  # N America
+    [(-80, 10), (-75, 5), (-60, 0), (-50, -5), (-35, -8), (-40, -20),
+     (-48, -28), (-58, -38), (-65, -45), (-70, -55), (-73, -40), (-70, -20),
+     (-77, -5)],  # S America
+    [(-10, 36), (-9, 43), (0, 48), (5, 58), (10, 62), (18, 70), (30, 70),
+     (40, 68), (45, 60), (40, 50), (30, 45), (23, 40), (19, 42), (12, 44),
+     (3, 43), (-2, 37)],  # Europe
+    [(-6, 35), (10, 37), (20, 32), (32, 31), (43, 12), (51, 10), (48, 0),
+     (40, -10), (35, -20), (32, -29), (25, -34), (18, -35), (12, -18),
+     (8, 4), (-8, 5), (-17, 15), (-16, 25)],  # Africa
+    [(40, 68), (60, 70), (80, 73), (110, 76), (140, 72), (160, 66),
+     (178, 65), (170, 60), (158, 52), (142, 45), (135, 35), (127, 33),
+     (120, 25), (110, 20), (105, 8), (100, 8), (95, 15), (90, 22), (80, 13),
+     (75, 8), (70, 20), (60, 25), (55, 26), (48, 29), (43, 12), (40, 20)],
+    # Asia
+    [(130, 31), (132, 33), (135, 34), (138, 35), (140, 38), (141, 42),
+     (143, 44), (141, 45), (139, 40), (136, 37), (133, 35)],  # Japan
+    [(95, 5), (100, 0), (105, -5), (110, -7), (115, -8), (120, -10),
+     (125, -9), (130, -4), (135, -3), (140, -8), (138, -8), (130, -3),
+     (120, -2), (110, 0), (105, 2), (100, 5)],  # Indonesia
+    [(113, -22), (114, -30), (115, -35), (124, -33), (130, -32), (137, -35),
+     (140, -38), (147, -39), (150, -37), (153, -27), (153, -22), (146, -19),
+     (142, -11), (136, -12), (132, -12), (126, -14), (122, -17), (114, -22)],
+    # Australia
+    [(-58, 64), (-45, 60), (-40, 65), (-30, 68), (-25, 70), (-35, 76),
+     (-55, 76), (-60, 74)],  # Greenland
+]
+
+# (n, lon, lat, dx, dy) — dx/dy offset the drawn pin from the true point.
+PINS = [
+    (1, 121, 31, 0, 0), (2, -74, 40.7, 0, 0), (3, 35, 48, -10, -8),
+    (4, 130, 37, 0, 0), (5, 160, -9, 0, 0), (6, -17, 14, 0, 0),
+    (7, -74, 40.7, 16, -9), (8, 2, 49, 0, 0), (9, 34, 31, 0, 0),
+    (10, 44, 33, 0, 0), (11, 56, 25, 0, 0), (12, 0, 51, -11, -8),
+    (13, -53, 5, 0, 0),
+]
 
 
 def main():
-    out_dir = resolve_output_dir()
-    out_path = out_dir / "entry.png"
     try:
-        img = render()
-        tmp = out_dir / ".entry.tmp.png"
-        img.save(tmp, "PNG")
-        os.replace(tmp, out_path)
-    except Exception as exc:  # never hard-exit: fall back to bundled entry
-        print(f"render failed ({exc}); falling back to bundled entry.png",
-              file=sys.stderr)
-        try:
-            bundled = HERE / "entry.png"
-            if bundled.resolve() != out_path.resolve():
-                shutil.copyfile(bundled, out_path)
-            else:
-                raise RuntimeError("bundled entry.png is the output path")
-        except Exception as exc2:
-            print(f"fallback copy failed ({exc2}); writing minimal image",
-                  file=sys.stderr)
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        # No Pillow: copy the bundled entry.png if present, else fail soft.
+        bundled = os.path.join(HERE, ENTRY_NAME)
+        out = os.path.join(resolve_output_dir(), ENTRY_NAME)
+        if os.path.exists(bundled):
+            shutil.copyfile(bundled, out)
+        return 0
+
+    def font(name, size):
+        for path in ("/usr/share/fonts/truetype/dejavu/%s" % name,
+                     "/usr/share/fonts/dejavu/%s" % name):
             try:
-                img = Image.new("RGB", (W, H), PAPER)
-                d = ImageDraw.Draw(img)
-                d.text((W // 2, H // 2 - 20), "THE WORLD TODAY", fill=INK,
-                       font=font(SERIF_BOLD, 40), anchor="mm")
-                d.text((W // 2, H // 2 + 20), "TUESDAY \u00b7 24 NOVEMBER 2026",
-                       fill=MUTED, font=font(SANS, 14), anchor="mm")
-                img.save(out_path, "PNG")
-            except Exception as exc3:
-                print(f"minimal image failed: {exc3}", file=sys.stderr)
-    try:
-        digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
-        print(f"wrote {out_path} ({out_path.stat().st_size} bytes) sha256={digest}")
-    except Exception as exc:
-        print(f"could not verify output: {exc}", file=sys.stderr)
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    serif = lambda s: font("DejaVuSerif-Bold.ttf", s)
+    serif_it = lambda s: font("DejaVuSerif-Italic.ttf", s)
+    sans = lambda s: font("DejaVuSans.ttf", s)
+    sans_b = lambda s: font("DejaVuSans-Bold.ttf", s)
+
+    img = Image.new("RGB", (W, H), PAPER)
+    d = ImageDraw.Draw(img)
+
+    def tw(f, text):
+        return d.textlength(text, font=f)
+
+    def wrap(f, text, width):
+        lines, cur = [], ""
+        for word in text.split(" "):
+            trial = (cur + " " + word).strip()
+            if tw(f, trial) <= width or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        return lines
+
+    # Deterministic fit: try sizes from the base size down.
+    def fit(family, size0, text, width, max_lines):
+        for size in range(size0, 6, -1):
+            f = family(size)
+            lines = wrap(f, text, width)
+            if len(lines) <= max_lines:
+                return f, lines
+        f = family(7)
+        return f, wrap(f, text, width)[:max_lines]
+
+    def load_scene(name, w, h):
+        path = os.path.join(HERE, name)
+        try:
+            im = Image.open(path).convert("RGB")
+        except Exception:
+            im = Image.new("RGB", (w, h), (210, 205, 190))
+        # Center-crop to the target aspect, then resize.
+        tw_, th_ = im.size
+        ta, sa = w / h, tw_ / th_
+        if sa > ta:
+            nw = int(th_ * ta)
+            x0 = (tw_ - nw) // 2
+            im = im.crop((x0, 0, x0 + nw, th_))
+        else:
+            nh = int(tw_ / ta)
+            y0 = (th_ - nh) // 2
+            im = im.crop((0, y0, tw_, y0 + nh))
+        return im.resize((w, h), Image.LANCZOS)
+
+    def badge(x, y, s, letter):
+        d.rectangle([x, y, x + s, y + s], fill=BADGE.get(letter, INK))
+        f = sans_b(max(7, s - 4))
+        t = letter
+        d.text((x + (s - tw(f, t)) / 2, y + (s - f.size) / 2 - 1),
+               t, font=f, fill=(255, 255, 255))
+
+    def section_title(y, text):
+        f = sans_b(11)
+        d.text((14, y), text, font=f, fill=INK)
+        d.line([(14, y + 13), (1010, y + 13)], fill=INK, width=1)
+        return y + 16
+
+    M = 14
+    CW = W - 2 * M
+    y = 4
+
+    # 1. Header line
+    f_left = sans_b(11)
+    d.text((M, y), "ONE DAY OF WORLD NEWS", font=f_left, fill=INK)
+    f_right = sans_b(10)
+    right = ("38 STORIES · 7 REGIONS · 19 FIELDS · EVERY ONE FROM "
+             "TUESDAY 24 NOVEMBER 2026")
+    d.text((W - M - tw(f_right, right), y + 1), right, font=f_right, fill=INK)
+    y += 18
+    d.line([(M, y), (W - M, y)], fill=INK, width=2)
+    y += 6
+
+    # 2. Giant masthead
+    f_mast = serif(46)
+    mast = "Tuesday 24 November 2026"
+    d.text(((W - tw(f_mast, mast)) / 2, y), mast, font=f_mast, fill=INK)
+    y += 52
+    d.line([(M, y), (W - M, y)], fill=INK, width=1)
+    y += 5
+
+    # 3. Sub-headline strip
+    f_sub = serif_it(15)
+    sub = "Shanghai probe  ·  Huawei guilty  ·  Russian attacks kill 9"
+    d.text(((W - tw(f_sub, sub)) / 2, y), sub, font=f_sub, fill=INK)
+    y += 20
+
+    # 4. Region chips
+    gap = 6
+    chip_w = (CW - gap * (len(CHIPS) - 1)) // len(CHIPS)
+    chip_h = 20
+    f_chip = sans_b(10)
+    for i, (name, count) in enumerate(CHIPS):
+        x0 = M + i * (chip_w + gap)
+        d.rounded_rectangle([x0, y, x0 + chip_w, y + chip_h], radius=4,
+                            outline=INK, width=1)
+        t = "%s %d" % (name, count)
+        d.text((x0 + (chip_w - tw(f_chip, t)) / 2, y + 3), t,
+               font=f_chip, fill=INK)
+    y += chip_h + 6
+
+    # 5. Timeline — THE DAY IN UTC
+    y = section_title(y, "THE DAY IN UTC")
+    col_w = CW / len(TIMELINE)
+    f_time = sans_b(11)
+    for i, (t, label) in enumerate(TIMELINE):
+        x0 = M + i * col_w
+        d.text((x0 + 2, y), t, font=sans_b(11), fill=RED)
+        for j, ln in enumerate(wrap(sans(9), label, col_w - 6)):
+            d.text((x0 + 2, y + 14 + j * 11), ln, font=sans(9), fill=INK)
+        if i:
+            d.line([(x0, y), (x0, y + 24)], fill=(200, 195, 180), width=1)
+    y += 26
+    d.line([(M, y), (W - M, y)], fill=(200, 195, 180), width=1)
+    y += 4
+
+    # 6. IN NUMBERS
+    y = section_title(y, "IN NUMBERS")
+    ncol = len(NUMBERS)
+    col_w = CW / ncol
+    for i, (num, label) in enumerate(NUMBERS):
+        x0 = M + i * col_w
+        f_num = serif(24)
+        d.text((x0 + 2, y), num, font=f_num, fill=INK)
+        for j, ln in enumerate(wrap(sans(9), label, col_w - 8)):
+            d.text((x0 + 2, y + 28 + j * 11), ln, font=sans(9), fill=MUTED)
+        if i:
+            d.line([(x0, y), (x0, y + 50)], fill=(200, 195, 180), width=1)
+    y += 50
+    d.line([(M, y), (W - M, y)], fill=INK, width=1)
+    y += 4
+
+    # 7. Feature cards
+    y = section_title(y, "FEATURED — 13 DRAWN STORIES")
+    big_h, small_h, cgap = 172, 144, 9
+    big_w = (CW - 2 * cgap) // 3
+    small_w = (CW - 4 * cgap) // 5
+
+    def card(x0, y0, w0, h0, n, imgname, tag, bd, headline, summary,
+             source, big):
+        d.rectangle([x0, y0, x0 + w0, y0 + h0], outline=INK, width=1)
+        scene_h = 82 if big else 60
+        scene = load_scene(imgname, w0 - 2, scene_h)
+        img.paste(scene, (x0 + 1, y0 + 1))
+        tx = x0 + 6
+        ty = y0 + scene_h + 6
+        f_tag = sans_b(9 if big else 8)
+        num = "%02d · %s" % (n, tag)
+        d.text((tx, ty), num, font=f_tag, fill=RED)
+        badge(x0 + w0 - 6 - (14 if big else 12), ty - 1, 14 if big else 12, bd)
+        hf, hlines = fit(serif, 12 if big else 11, headline, w0 - 12, 2)
+        hy = ty + (15 if big else 13)
+        for j, ln in enumerate(hlines):
+            d.text((tx, hy + j * (14 if big else 13)), ln, font=hf, fill=INK)
+        sf = sans(10 if big else 9)
+        slines = wrap(sf, summary, w0 - 12)
+        sy = hy + len(hlines) * (14 if big else 13) + 3
+        for j, ln in enumerate(slines[:2]):
+            d.text((tx, sy + j * (12 if big else 11)), ln, font=sf, fill=INK)
+        d.text((tx, y0 + h0 - 13), source, font=sans(8 if big else 7),
+               fill=MUTED)
+
+    for i, f in enumerate(FEATURES[:3]):
+        card(M + i * (big_w + cgap), y, big_w, big_h, *f, big=True)
+    y += big_h + 6
+    for i, f in enumerate(FEATURES[3:8]):
+        card(M + i * (small_w + cgap), y, small_w, small_h, *f, big=False)
+    y += small_h + 6
+    for i, f in enumerate(FEATURES[8:13]):
+        card(M + i * (small_w + cgap), y, small_w, small_h, *f, big=False)
+    y += small_h + 8
+
+    # 8. ALSO — 25 more, 3 columns
+    y = section_title(y, "ALSO ON TUESDAY 24 NOVEMBER · 25 MORE, BY REGION")
+    cols = [ALSO[0:9], ALSO[9:18], ALSO[18:25]]
+    col_w = CW / 3
+    f_num = sans_b(9)
+    f_bdg = sans_b(9)
+    f_head = sans(9)
+    f_src = sans(9)
+    for ci, col in enumerate(cols):
+        x0 = M + ci * col_w
+        for ri, (n, bd, headline, source) in enumerate(col):
+            yy = y + ri * 13
+            d.text((x0, yy), str(n), font=f_num, fill=INK)
+            bx = x0 + 20
+            d.text((bx, yy), bd, font=f_bdg, fill=BADGE.get(bd, INK))
+            hx = bx + tw(f_bdg, "CL") + 6
+            d.text((hx, yy), headline, font=f_head, fill=INK)
+            sx = hx + tw(f_head, headline) + 5
+            d.text((sx, yy), "— " + source, font=f_src, fill=MUTED)
+    y += 9 * 13 + 6
+
+    # 9. World map with pins 1–13
+    y = section_title(y, "WHERE IT HAPPENED · PINS 1–13")
+    map_x, map_y, map_w, map_h = M, y, 640, 76
+    d.rectangle([map_x, map_y, map_x + map_w, map_y + map_h],
+                outline=INK, width=1)
+    def proj(lon, lat):
+        return (map_x + (lon + 170) / 360.0 * map_w,
+                map_y + (72 - lat) / 127.0 * map_h)
+    for poly in CONTINENTS:
+        pts = [proj(lon, lat) for lon, lat in poly]
+        d.polygon(pts, fill=LAND, outline=LAND_LINE)
+    for (n, lon, lat, dx, dy) in PINS:
+        px, py = proj(lon, lat)
+        cx, cy = px + dx, py + dy
+        if dx or dy:
+            d.line([(px, py), (cx, cy)], fill=RED, width=1)
+        d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=RED,
+                  outline=(255, 255, 255), width=1)
+        t = str(n)
+        f_pin = sans_b(7)
+        d.text((cx - tw(f_pin, t) / 2, cy - 5), t, font=f_pin,
+               fill=(255, 255, 255))
+    lx = map_x + map_w + 14
+    d.text((lx, map_y), "REGION COUNTS", font=sans_b(10), fill=INK)
+    f_leg = sans(9)
+    legend = [("Europe 8", "Middle East 6"), ("Africa 5", "Asia 9"),
+              ("Oceania 4", "Americas 5"), ("World 1", "")]
+    for ri, (a, b) in enumerate(legend):
+        yy = map_y + 16 + ri * 13
+        d.text((lx, yy), a, font=f_leg, fill=INK)
+        if b:
+            d.text((lx + 110, yy), b, font=f_leg, fill=INK)
+    d.text((lx, map_y + 16 + 4 * 13 + 2),
+           "Pins 1–13 = featured stories above.", font=sans(8), fill=MUTED)
+    y += map_h + 6
+
+    # 10. DATE CHECK (shrink font until the line fits; never clip)
+    dc = ("DATE CHECK — Left out: COP31 ended without a deal (closed Sun 22 Nov) · "
+          "Russia's warning to Estonia (statement 23 Nov) · Indonesia fire toll 26 "
+          "(fire Sat 21 Nov) · Solomons–Australia treaty (signed Wed 25 Nov).")
+    f_dc = sans_b(9)
+    while tw(f_dc, dc) > CW and f_dc.size > 7:
+        f_dc = sans_b(f_dc.size - 1)
+    d.text((M, y), dc, font=f_dc, fill=INK)
+    y += 13
+    d.line([(M, y), (W - M, y)], fill=INK, width=1)
+    y += 4
+
+    # 11. Footer
+    f_foot = sans(9)
+    foot1 = "C = 2+ outlets  ·  O = official source  ·  R = one outlet  ·  CL = one side's claim"
+    d.text(((W - tw(f_foot, foot1)) / 2, y), foot1, font=f_foot, fill=MUTED)
+    y += 12
+    foot2 = ("Every story happened or was first reported on Tuesday 24 Nov 2026 (UTC) · "
+             "sources named on each item · original drawings, no photos")
+    d.text(((W - tw(f_foot, foot2)) / 2, y), foot2, font=f_foot, fill=MUTED)
+    y += 12
+
+    out_dir = resolve_output_dir()
+    out_path = os.path.join(out_dir, ENTRY_NAME)
+    img.save(out_path, "PNG", optimize=True)
+    # Also drop a copy next to main.py for inspection/bundling.
+    local = os.path.join(HERE, ENTRY_NAME)
+    if os.path.abspath(local) != os.path.abspath(out_path):
+        shutil.copyfile(out_path, local)
+    print("wrote %s (%dx%d) final_y=%d" % (out_path, W, H, y))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

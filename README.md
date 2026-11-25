@@ -4,13 +4,16 @@
 
 # THE WORLD TODAY — 24 November 2026
 
-A dense one-page newspaper summing up Tuesday 24 November 2026 in 30 verified
-stories across 9 regions: the Gaza strike that killed Hamas security chief
-Naeem Abu Nahel leads the page with an illustrated scene, followed by the
-record TAIEX surge (+8.99% to 40,122.35), the Shanghai party-boss purge, the
-Zaporizhzhia strike (illustrated mid-page), the $41bn Sanofi–Insmed deal,
-Huawei's US conviction, and Wall Street's AI reversal — every event dated
-24 November 2026 and checked against Reuters, AP, UN and official sources.
+A dense one-page newspaper summing up Tuesday 24 November 2026 in 38 verified
+stories across 7 regions and 19 fields: the Shanghai party-boss purge, Huawei's
+US conviction (10 of 12 counts), Russian attacks killing 9 across Ukraine, the
+Solomons letting its China pact lapse, Senegal's restored AFCON title, the Dow
+closing back above 50,000, the $41bn Sanofi–Insmed deal, the Gaza strike that
+killed Hamas security chief Naeem Abu Nahel, and 30 more — every event dated
+24 November 2026, sourced by name (Reuters, AP, AFP, official releases), with
+claim badges (C = 2+ outlets, O = official, R = one outlet, CL = one side's
+claim), a UTC timeline, an IN NUMBERS strip, and a world map with numbered pins
+for the 13 drawn feature stories.
 
 ## Run it
 
@@ -18,7 +21,7 @@ Huawei's US conviction, and Wall Street's AI reversal — every event dated
 python3 main.py
 ```
 
-Writes `entry.png` (768×1024) to `/output`, or to `$MAKEFUN_OUTPUT_DIR` when set.
-Deterministic: two runs produce byte-identical output. Stdlib + Pillow only,
-no network. `scene.png` (Gaza) and `scene2.png` (Zaporizhzhia) are loaded
-from this directory at render time.
+Writes `entry.png` (1024×1024) to `/output`, or to a temp directory when
+`/output` is not writable. Deterministic: two runs produce byte-identical
+output. Stdlib + Pillow only, no network. `card1.png`–`card13.png` (original
+drawn scenes, no photos) are loaded from this directory at render time.
